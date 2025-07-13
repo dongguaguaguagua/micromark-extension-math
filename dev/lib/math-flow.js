@@ -21,6 +21,49 @@ const nonLazyContinuation = {
 }
 
 /**
+ * A tokenizer for a closing fence that can appear midline.
+ * It does not handle line prefixes and is more lenient about what follows.
+ * @type {Tokenizer}
+ */
+function tokenizeClosingFenceMidline(effects, ok, nok) {
+  const self = this
+  let size = 0
+
+  // This tokenizer is simpler because it doesn't need to handle indentation/prefixes.
+  return sequenceStart
+
+  /** @type {State} */
+  function sequenceStart(code) {
+    // Must start with a dollar.
+    if (code !== codes.dollarSign) {
+      return nok(code)
+    }
+    effects.enter('mathFlowFence')
+    effects.enter('mathFlowFenceSequence')
+    return sequenceClose(code)
+  }
+
+  /** @type {State} */
+  function sequenceClose(code) {
+    if (code === codes.dollarSign) {
+      size++
+      effects.consume(code)
+      return sequenceClose
+    }
+
+    // @ts-expect-error - `sizeOpen` is defined in the parent tokenizer's scope.
+    if (size < self.sizeOpen) {
+      return nok(code)
+    }
+
+    effects.exit('mathFlowFenceSequence')
+    effects.exit('mathFlowFence')
+    // Successfully found a closing fence. Any character can follow.
+    return ok(code)
+  }
+}
+
+/**
  * @this {TokenizeContext}
  * @type {Tokenizer}
  */
@@ -33,17 +76,14 @@ function tokenizeMathFenced(effects, ok, nok) {
       : 0
   let sizeOpen = 0
 
+  // Pass sizeOpen to the helper tokenizer through the context.
+  // @ts-expect-error
+  self.sizeOpen = sizeOpen
+
   return start
 
   /**
    * Start of math.
-   *
-   * ```markdown
-   * > | $$
-   *     ^
-   *   | \frac{1}{2}
-   *   | $$
-   * ```
    *
    * @type {State}
    */
@@ -58,13 +98,6 @@ function tokenizeMathFenced(effects, ok, nok) {
   /**
    * In opening fence sequence.
    *
-   * ```markdown
-   * > | $$
-   *      ^
-   *   | \frac{1}{2}
-   *   | $$
-   * ```
-   *
    * @type {State}
    */
   function sequenceOpen(code) {
@@ -77,6 +110,8 @@ function tokenizeMathFenced(effects, ok, nok) {
     if (sizeOpen < 2) {
       return nok(code)
     }
+    // @ts-expect-error
+    self.sizeOpen = sizeOpen
 
     effects.exit('mathFlowFenceSequence')
     return factorySpace(effects, metaBefore, types.whitespace)(code)
@@ -85,62 +120,22 @@ function tokenizeMathFenced(effects, ok, nok) {
   /**
    * In opening fence, before meta.
    *
-   * ```markdown
-   * > | $$asciimath
-   *       ^
-   *   | x < y
-   *   | $$
-   * ```
-   *
    * @type {State}
    */
 
   function metaBefore(code) {
-    if (code === codes.eof || markdownLineEnding(code)) {
-      return metaAfter(code)
+    // MODIFICATION: Handle content on the same line as the opening fence.
+    if (code !== codes.eof && !markdownLineEnding(code)) {
+      effects.exit('mathFlowFence')
+      effects.enter('mathFlowValue')
+      return contentChunk(code)
     }
-
-    effects.enter('mathFlowFenceMeta')
-    effects.enter(types.chunkString, {contentType: constants.contentTypeString})
-    return meta(code)
-  }
-
-  /**
-   * In meta.
-   *
-   * ```markdown
-   * > | $$asciimath
-   *        ^
-   *   | x < y
-   *   | $$
-   * ```
-   *
-   * @type {State}
-   */
-  function meta(code) {
-    if (code === codes.eof || markdownLineEnding(code)) {
-      effects.exit(types.chunkString)
-      effects.exit('mathFlowFenceMeta')
-      return metaAfter(code)
-    }
-
-    if (code === codes.dollarSign) {
-      return nok(code)
-    }
-
-    effects.consume(code)
-    return meta
+    // Original behavior: empty line after the fence.
+    return metaAfter(code)
   }
 
   /**
    * After meta.
-   *
-   * ```markdown
-   * > | $$
-   *       ^
-   *   | \frac{1}{2}
-   *   | $$
-   * ```
    *
    * @type {State}
    */
@@ -162,14 +157,6 @@ function tokenizeMathFenced(effects, ok, nok) {
   /**
    * After eol/eof in math, at a non-lazy closing fence or content.
    *
-   * ```markdown
-   *   | $$
-   * > | \frac{1}{2}
-   *     ^
-   * > | $$
-   *     ^
-   * ```
-   *
    * @type {State}
    */
   function beforeNonLazyContinuation(code) {
@@ -182,13 +169,6 @@ function tokenizeMathFenced(effects, ok, nok) {
 
   /**
    * Before math content, definitely not before a closing fence.
-   *
-   * ```markdown
-   *   | $$
-   * > | \frac{1}{2}
-   *     ^
-   *   | $$
-   * ```
    *
    * @type {State}
    */
@@ -207,13 +187,6 @@ function tokenizeMathFenced(effects, ok, nok) {
 
   /**
    * Before math content, after optional prefix.
-   *
-   * ```markdown
-   *   | $$
-   * > | \frac{1}{2}
-   *     ^
-   *   | $$
-   * ```
    *
    * @type {State}
    */
@@ -237,16 +210,15 @@ function tokenizeMathFenced(effects, ok, nok) {
   /**
    * In math content.
    *
-   * ```markdown
-   *   | $$
-   * > | \frac{1}{2}
-   *      ^
-   *   | $$
-   * ```
-   *
    * @type {State}
    */
   function contentChunk(code) {
+    // MODIFICATION: Check for a closing fence at any point.
+    if (code === codes.dollarSign) {
+      effects.exit('mathFlowValue')
+      return attemptClosingFenceMidline(code)
+    }
+
     if (code === codes.eof || markdownLineEnding(code)) {
       effects.exit('mathFlowValue')
       return beforeContentChunk(code)
@@ -257,14 +229,31 @@ function tokenizeMathFenced(effects, ok, nok) {
   }
 
   /**
+   * A new state to attempt parsing a midline closing fence.
+   * @type {State}
+   */
+  function attemptClosingFenceMidline(code) {
+    return effects.attempt(
+      {tokenize: tokenizeClosingFenceMidline, partial: true},
+      after,
+      failedMidlineAttempt
+    )(code)
+  }
+
+  /**
+   * A new state for when the midline closing fence attempt fails.
+   * @type {State}
+   */
+  function failedMidlineAttempt(code) {
+    // The attempt failed. The character is not part of a fence.
+    // Re-enter the value state, consume the character, and continue content parsing.
+    effects.enter('mathFlowValue')
+    effects.consume(code)
+    return contentChunk
+  }
+
+  /**
    * After math (ha!).
-   *
-   * ```markdown
-   *   | $$
-   *   | \frac{1}{2}
-   * > | $$
-   *       ^
-   * ```
    *
    * @type {State}
    */
@@ -278,16 +267,6 @@ function tokenizeMathFenced(effects, ok, nok) {
     let size = 0
 
     assert(self.parser.constructs.disable.null, 'expected `disable.null`')
-    /**
-     * Before closing fence, at optional whitespace.
-     *
-     * ```markdown
-     *   | $$
-     *   | \frac{1}{2}
-     * > | $$
-     *     ^
-     * ```
-     */
     return factorySpace(
       effects,
       beforeSequenceClose,
@@ -298,15 +277,6 @@ function tokenizeMathFenced(effects, ok, nok) {
     )
 
     /**
-     * In closing fence, after optional whitespace, at sequence.
-     *
-     * ```markdown
-     *   | $$
-     *   | \frac{1}{2}
-     * > | $$
-     *     ^
-     * ```
-     *
      * @type {State}
      */
     function beforeSequenceClose(code) {
@@ -316,15 +286,6 @@ function tokenizeMathFenced(effects, ok, nok) {
     }
 
     /**
-     * In closing fence sequence.
-     *
-     * ```markdown
-     *   | $$
-     *   | \frac{1}{2}
-     * > | $$
-     *      ^
-     * ```
-     *
      * @type {State}
      */
     function sequenceClose(code) {
@@ -343,15 +304,6 @@ function tokenizeMathFenced(effects, ok, nok) {
     }
 
     /**
-     * After closing fence sequence, after optional whitespace.
-     *
-     * ```markdown
-     *   | $$
-     *   | \frac{1}{2}
-     * > | $$
-     *       ^
-     * ```
-     *
      * @type {State}
      */
     function afterSequenceClose(code) {
