@@ -27,7 +27,7 @@
   "type": "module",
   "exports": {
     "development": "./dev/index.js",
-    "default": "./index.js"
+    "default": "./dev/index.js"
   },
   "files": [
     "dev/",
